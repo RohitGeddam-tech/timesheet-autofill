@@ -149,6 +149,23 @@ timesheet config list
 timesheet config set POLISH_HINT=false LUNCH=13:30-14:30
 ```
 
+### Projects follow the repo
+
+Each entry in `REPOS` names the site project its work is filed under, so one day can hold rows for several projects:
+
+```
+key=owner/name|Label|merge branch|Project|Subject prefix
+```
+
+```bash
+timesheet config set "REPOS=console=strategic-gears/sg-network-internal-console|Internal Console|staging|Strategic Gears|SG Network,ada=acme/ada-web|Ada Web|main|ADA"
+```
+
+- **GitHub activity and conversations** take the project of the repo they happened in. A conversation belongs to a repo when its folder, or that folder's git remote, is that repo.
+- **Testing rows** are one task per project per day.
+- **`PROJECT`** is only the default, for repos that name no project and for work in folders outside every repo. Leave it empty and that work is left out and listed in the report, instead of being filed under the wrong project.
+- **Manual work:** `add-row`, `--note` (`"13:20-16:11 | Testing | text | ada"`) and `start` take a repo key; a row given `--task` follows that task's project.
+
 `.env.example` describes every setting. A bad value or an unknown setting is refused and nothing is written. Changing the site address or email re-tests the login.
 
 After changing your site password:

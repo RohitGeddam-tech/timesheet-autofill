@@ -97,9 +97,10 @@ load_env(ENV_FILE)
 SETTINGS = {
     "TS_URL": ("", "url", "Site address, e.g. https://projects.yourcompany.com"),
     "TS_USER": ("", "email", "Site login email"),
-    "PROJECT": ("", "text", "Project that every task and row is filed under"),
-    "SUBJECT_PREFIX": ("", "text", "Start of every task subject, e.g. SG Network"),
-    "REPOS": ("", "repos", "Repos to read: key=owner/name|Label|merge-branch, comma separated"),
+    "REPOS": ("", "repos", "Repos to read, each with its own project: "
+                           "key=owner/name|Label|merge-branch|Project|Subject prefix, comma separated"),
+    "PROJECT": ("", "text", "Default project, for work outside those repos and repos that name none (may be empty)"),
+    "SUBJECT_PREFIX": ("", "text", "Start of the default project's task subjects, e.g. SG Network"),
     "TRACKING_REPO": ("", "text", "Repo key (or owner/name) for work that belongs to no repo"),
     "TASK_PRIORITY": ("Low", "text", "Priority of created tasks"),
     "TASK_MODULE": ("Customised", "text", "Module of created tasks"),
@@ -118,7 +119,8 @@ EXPECT = {
     "url": "a site address like https://projects.yourcompany.com",
     "email": "an email address",
     "text": "some text",
-    "repos": "key=owner/name|Label|merge-branch, comma separated, e.g. console=acme/console|Console|staging",
+    "repos": "key=owner/name|Label|merge-branch|Project|Subject prefix, comma separated (only owner/name is "
+             "required), e.g. console=acme/console|Console|staging|Acme ERP|Acme",
     "days": "day names like Mon,Tue or numbers 1-7",
     "time": "24h HH:MM, e.g. 09:30",
     "window": "two 24h times, e.g. 13:00-14:00",
@@ -127,10 +129,10 @@ EXPECT = {
     "bool": "true or false",
     "schedule": "off, remind or auto",
 }
-GUIDED = ("TS_URL", "TS_USER", "PROJECT", "SUBJECT_PREFIX", "REPOS", "TRACKING_REPO",
+GUIDED = ("TS_URL", "TS_USER", "REPOS", "PROJECT", "SUBJECT_PREFIX", "TRACKING_REPO",
           "WORK_DAYS", "DAY_START", "LUNCH", "SCHEDULE")
 DAY_NAMES = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
-Repo = collections.namedtuple("Repo", "name label branch")
+Repo = collections.namedtuple("Repo", "name label branch project prefix")
 
 
 def cfg(key: str) -> str:
@@ -189,15 +191,15 @@ def parse_offset(value: str) -> dt.timedelta:
 
 
 def parse_repos(value: str) -> dict[str, Repo]:
-    """'console=acme/console|Console|staging,...' -> {'console': Repo(...)}."""
+    """'console=acme/console|Console|staging|Acme ERP|Acme,...' -> {'console': Repo(...)}."""
     out = {}
     for part in filter(None, (p.strip() for p in value.split(","))):
         key, _, rest = part.partition("=")
         key, bits = key.strip().lower(), [b.strip() for b in rest.split("|")]
-        if not re.fullmatch(r"[\w-]+", key) or not re.fullmatch(r"[\w.-]+/[\w.-]+", bits[0]):
+        if not re.fullmatch(r"[\w-]+", key) or not re.fullmatch(r"[\w.-]+/[\w.-]+", bits[0]) or len(bits) > 5:
             raise ValueError(part)
-        out[key] = Repo(bits[0], bits[1] if len(bits) > 1 and bits[1] else key.title(),
-                        bits[2] if len(bits) > 2 else "")
+        bits += [""] * (5 - len(bits))
+        out[key] = Repo(bits[0], bits[1] or key.title(), bits[2], bits[3], bits[4])
     return out
 
 
@@ -244,7 +246,18 @@ def tracking() -> Repo | None:
     value = cfg("TRACKING_REPO")
     if value.lower() in repos():
         return repos()[value.lower()]
-    return Repo(value, "", "") if "/" in value else None
+    return Repo(value, "", "", "", "") if "/" in value else None
+
+
+def project_of(key: str) -> str:
+    """Project for work on a repo (by key): the repo's own, else the default. '' when neither is set."""
+    return getattr(repos().get(key), "project", "") or cfg("PROJECT")
+
+
+def prefix_of(key: str) -> str:
+    """Start of a task subject: the repo's prefix, else its own project's name, else the default prefix."""
+    r = repos().get(key)
+    return (r.prefix or r.project) if r and (r.prefix or r.project) else cfg("SUBJECT_PREFIX")
 
 
 # ---------------------------------------------------------------- time
@@ -427,7 +440,7 @@ def wait_for_network(timeout: int = 600, interval: int = 15) -> None:
 
 def connect(network_wait: int = 30) -> dict:
     """Checks the settings, signs in and returns your Employee record."""
-    for key in ("TS_URL", "TS_USER", "PROJECT"):
+    for key in ("TS_URL", "TS_USER"):
         if not cfg(key):
             raise TSError(f"{key} is not set - run: timesheet config")
     wait_for_network(timeout=network_wait)
@@ -614,12 +627,12 @@ def guess_kind(text: str) -> str:
     return "development"
 
 
-def subject(kind: str, day: dt.date, label: str | None = None, title: str | None = None,
-            window: str | None = None) -> str:
-    """'SG Network - Internal Console - PR Review & Merge - 7 Oct 2026', with a '(09:30-11:00)'
-    window for timed and conversation work."""
+def subject(kind: str, day: dt.date, key: str = "", title: str | None = None,
+            window: str | None = None, label: bool = True) -> str:
+    """'SG Network - Internal Console - PR Review & Merge - 7 Oct 2026' for the repo `key`, with a
+    '(09:30-11:00)' window for timed and conversation work."""
     suffix = title or (KINDS[kind][0] if kind in KINDS else kind)
-    parts = [cfg("SUBJECT_PREFIX"), label, suffix, fmt_day(day)]
+    parts = [prefix_of(key), repos()[key].label if label and key in repos() else None, suffix, fmt_day(day)]
     text = " - ".join(p for p in parts if p)
     return f"{text} ({window})" if window else text
 
@@ -652,8 +665,8 @@ def split_blocks(stamps: list, idle: dt.timedelta) -> list:
 
 
 def group_key(e: dict) -> tuple:
-    # Testing is one task for the day, so issues raised on different repos share a row.
-    return ("", "raised") if e["kind"] == "raised" else (e["repo"], e["kind"])
+    # Testing is one task per project for the day, so issues raised on its repos share a row.
+    return (e.get("project", ""), "raised") if e["kind"] == "raised" else (e["repo"], e["kind"])
 
 
 def build_rows(events: list, busy: list, day: dt.date, day_start: dt.timedelta, lunch_end: dt.timedelta,
@@ -786,12 +799,15 @@ def collect_github(day: dt.date) -> tuple[list, list]:
     lo, hi = day_bounds(day)
     span = f"{utc_iso(lo)}..{utc_iso(hi)}"
     scope_q, me = " ".join(f"repo:{name}" for name in scope), gh_user()
-    events, tracked = [], {}
+    events, tracked, skipped = [], {}, set()
 
     def event(kind: str, n: dict, when: str) -> None:
         key = names.get(n["repository"]["nameWithOwner"].lower())
-        if key:  # plain activity on a tracking-only repo is not timesheet work
-            events.append({"kind": kind, "repo": key, "t": local(when).replace(second=0), "n": n["number"],
+        if key and not project_of(key):
+            skipped.add(key)
+        elif key:  # plain activity on a tracking-only repo is not timesheet work
+            events.append({"kind": kind, "repo": key, "project": project_of(key),
+                           "t": local(when).replace(second=0), "n": n["number"],
                            "title": n["title"], "url": n["url"], "base": n.get("baseRefName", ""),
                            "head": n.get("headRefName", ""), "add": n.get("additions"), "del": n.get("deletions")})
 
@@ -825,6 +841,8 @@ def collect_github(day: dt.date) -> tuple[list, list]:
     for n in gh_search(f"{scope_q} is:issue author:{me} created:{span}"):
         if not track(n):
             event("raised", n, n["createdAt"])
+    for key in sorted(skipped):
+        log(f"warning: repo '{key}' has no project (none in REPOS, no default PROJECT) - its activity is left out")
     return events, list(tracked.values())
 
 
@@ -851,9 +869,9 @@ def describe(group: list) -> str:
 
 def describe_tasks(events: list, day: dt.date) -> dict:
     """Task description (HTML) by task subject, listing every PR or issue of the day behind it."""
-    rp, groups = repos(), collections.defaultdict(list)
+    groups = collections.defaultdict(list)
     for e in sorted(events, key=lambda e: e["t"]):
-        groups[subject(e["kind"], day, None if e["kind"] == "raised" else rp[e["repo"]].label)].append(e)
+        groups[subject(e["kind"], day, e["repo"], label=e["kind"] != "raised")].append(e)
     intro = {"own": "Own changes finished, tested and merged on {}.",
              "review": "Pull requests reviewed and merged on {}.",
              "closed": "GitHub issues checked against the merged changes and closed on {}.",
@@ -1016,6 +1034,9 @@ def build_day(day: dt.date, fixed: list, use_conversations: bool = True) -> tupl
 
     def place(start: dt.datetime, end: dt.datetime, row: dict, what: str) -> None:
         """Adds an interval row in the largest piece of its window that is still free."""
+        if not row.get("task") and not row.get("project"):
+            report.append(f"{what}: left out - its folder is in no repo from REPOS and there is no default PROJECT")
+            return
         pieces = [p for p in subtract(max(start, lo), min(end, hi), busy) if p[1] - p[0] >= MIN_ROW]
         if not pieces:
             report.append(f"{what}: already covered by other rows")
@@ -1035,10 +1056,10 @@ def build_day(day: dt.date, fixed: list, use_conversations: bool = True) -> tupl
             continue
         if t["end"] > hi:
             report.append(f"{what} runs past midnight: the rest is left for {day + dt.timedelta(days=1)}")
-        label = rp[t["repo"]].label if t["repo"] else None
         place(t["start"], t["end"],
               {"activity": activity(t["kind"]), "description": f"{t['text']}\n{TRACK}{t['url']}", "task": t["task"],
-               "subject": subject(t["kind"], day, label, title=t["text"][:60],
+               "project": project_of(t["repo"]),
+               "subject": subject(t["kind"], day, t["repo"], title=t["text"][:60],
                                   window=f"{hm(max(t['start'], lo))}-{hm(min(t['end'], hi))}")}, what)
 
     # Claude Code conversations: part of a GitHub row, work on an open PR, or a new tracking issue.
@@ -1058,19 +1079,20 @@ def build_day(day: dt.date, fixed: list, use_conversations: bool = True) -> tupl
                 loose.append(s)
                 continue
             for b0, b1 in s["blocks"]:
-                place(b0, b1, {"activity": activity("own"), "task": "",
+                place(b0, b1, {"activity": activity("own"), "task": "", "project": project_of(s["repo"]),
                                "description": f"Worked on PR #{pr['number']} - {pr['title']} (not merged yet).",
-                               "subject": subject("own", day, repo.label)}, f"conversation {hm(b0)}-{hm(b1)}")
+                               "subject": subject("own", day, s["repo"])}, f"conversation {hm(b0)}-{hm(b1)}")
         summarise(loose)
         for s in loose:
             repo = rp.get(s["repo"])
             home = repo or tracking()
             issue = {"repo": home.name if home else "", "title": s["summary"], "kind": s["kind"],
                      "start": s["blocks"][0][0], "end": s["blocks"][-1][1], "url": ""}
-            subj_ = subject(s["kind"], day, repo.label if repo else None, title=s["summary"],
+            subj_ = subject(s["kind"], day, s["repo"], title=s["summary"],
                             window=f"{hm(issue['start'])}-{hm(issue['end'])}")
             for b0, b1 in s["blocks"]:
                 place(b0, b1, {"activity": activity(s["kind"]), "task": "", "subject": subj_, "issue": issue,
+                               "project": project_of(s["repo"]),
                                "description": f"{s['summary']}.\n{NO_ISSUE}"}, f"conversation {hm(b0)}-{hm(b1)}")
 
     # GitHub events fill the time around everything above.
@@ -1078,9 +1100,9 @@ def build_day(day: dt.date, fixed: list, use_conversations: bool = True) -> tupl
     since_midnight = lambda t: dt.datetime.combine(day, t) - lo  # noqa: E731
     for frm, to, group in build_rows(fresh, busy, day, since_midnight(start), since_midnight(lunch[1])):
         kind = group[0]["kind"]
-        label = None if kind == "raised" else rp[group[0]["repo"]].label
-        new.append({"frm": frm, "to": to, "activity": activity(kind), "description": describe(group),
-                    "task": "", "subject": subject(kind, day, label)})
+        new.append({"frm": frm, "to": to, "activity": activity(kind), "description": describe(group), "task": "",
+                    "project": group[0]["project"],
+                    "subject": subject(kind, day, group[0]["repo"], label=kind != "raised")})
 
     rows = fixed + new
     if rows:
@@ -1209,16 +1231,19 @@ def task_subjects(ids) -> dict:
     return {t["name"]: t["subject"] for t in get_list("Task", [["name", "in", ids]], ["name", "subject"], limit=200)}
 
 
-def ensure_task(subj: str, day: dt.date, desc: str = "", status: str = "Completed", expected: float = 0.0,
-                parent: str = "") -> str:
-    """The task with exactly this subject - looked up first, so re-runs never duplicate."""
-    found = get_list("Task", [["subject", "=", subj], ["project", "=", cfg("PROJECT")]], ["name", "description"])
+def ensure_task(subj: str, day: dt.date, project: str, desc: str = "", status: str = "Completed",
+                expected: float = 0.0, parent: str = "") -> str:
+    """The task with exactly this subject in `project` - looked up first, so re-runs never duplicate."""
+    if not project:
+        raise TSError(f"no project for the task '{subj}': give the repo a project in REPOS "
+                      "(key=owner/name|Label|branch|Project), pass --repo or --task, or set a default PROJECT")
+    found = get_list("Task", [["subject", "=", subj], ["project", "=", project]], ["name", "description"])
     if found:
         if desc and found[0].get("description") != desc:
             api("PUT", f"/api/resource/Task/{found[0]['name']}", body={"description": desc})
         return found[0]["name"]
     body = {
-        "subject": subj, "project": cfg("PROJECT"), "status": status, "priority": cfg("TASK_PRIORITY"),
+        "subject": subj, "project": project, "status": status, "priority": cfg("TASK_PRIORITY"),
         "exp_start_date": day.isoformat(), "exp_end_date": day.isoformat(), "expected_time": round(expected, 6),
         "description": desc or f"<p><strong>{html.escape(subj)}</strong></p>",
         # Custom fields of the 8848 projects site; a site without them ignores them.
@@ -1255,7 +1280,7 @@ def payload(r: dict, fresh: bool) -> dict:
     body = {} if fresh else dict(raw)
     body.update(activity_type=r["activity"], from_time=f"{r['frm']:%Y-%m-%d %H:%M:%S}",
                 to_time=f"{r['to']:%Y-%m-%d %H:%M:%S}", hours=round(hours(r), 6),
-                description=r["description"], project=raw.get("project") or cfg("PROJECT"), task=r["task"])
+                description=r["description"], project=r.get("project") or raw.get("project"), task=r["task"])
     return body
 
 
@@ -1283,9 +1308,11 @@ def write_sheet(emp: dict, day: dt.date, sheet: dict | None, rows: list, args, t
     for r in rows:  # tasks first, so every row has one to link to
         if not r.get("task"):
             if r["subject"] not in made:
-                made[r["subject"]] = ensure_task(r["subject"], day,
+                made[r["subject"]] = ensure_task(r["subject"], day, r.get("project", ""),
                                                  (task_html or {}).get(r["subject"]) or r.get("task_html", ""))
             r["task"] = made[r["subject"]]
+        elif not r.get("raw") or r["task"] != r["raw"].get("task"):  # the row follows its task's project
+            r["project"] = api("GET", f"/api/resource/Task/{r['task']}")["data"].get("project")
     logs = [payload(r, fresh=submitted) for r in rows]
     if submitted:
         api("POST", "/api/method/frappe.client.cancel", body={"doctype": "Timesheet", "name": sheet["name"]})
@@ -1318,15 +1345,24 @@ def write_sheet(emp: dict, day: dt.date, sheet: dict | None, rows: list, args, t
 
 # ---------------------------------------------------------------- commands: the day's sheet
 
-def manual_row(day: dt.date, frm: str, to: str, kind: str, text: str, args, task: str = "") -> dict:
-    """A row you describe yourself. Without --task it goes on the day's task for that activity."""
-    act = activity(kind or cfg("DEFAULT_ACTIVITY"))
-    if task:
-        api("GET", f"/api/resource/Task/{task}")  # must exist
+def repo_key(name: str | None) -> str:
+    key = (name or "").strip().lower()
+    if key and key not in repos():
+        raise TSError(f"unknown repo '{name}' - configured: {', '.join(repos()) or 'none'}")
+    return key
+
+
+def manual_row(day: dt.date, frm: str, to: str, kind: str, text: str, args, task: str = "", repo: str = "") -> dict:
+    """A row you describe yourself. Without --task it goes on the day's task for that activity,
+    in the project of `repo` (the default project without one)."""
+    act, key = activity(kind or cfg("DEFAULT_ACTIVITY")), repo_key(repo)
+    if not task and not project_of(key):
+        raise TSError("which project is this row for? Pass --repo (its project is used) or --task, "
+                      "or set a default with: timesheet config set PROJECT=...")
     suffix = {"Testing": "UAT Testing", "Code Review": "PR Review & Merge",
               "Issue handling": "GitHub Issues Resolved"}.get(act, act.split(" / ")[-1])
     return {"frm": at(day, frm), "to": at(day, to), "activity": act, "description": typed(text, args),
-            "task": task, "subject": subject(suffix, day)}
+            "task": task, "project": project_of(key), "subject": subject(suffix, day, key, label=act != "Testing")}
 
 
 def cmd_create(args) -> int:
@@ -1342,9 +1378,10 @@ def cmd_create(args) -> int:
     for note in args.note or []:
         parts = [p.strip() for p in note.split("|")]
         window = parts[0].split("-")
-        if len(parts) != 3 or len(window) != 2:
-            raise TSError(f"--note '{note}': use \"13:20-16:11 | Testing | what you did\"")
-        rows.append(manual_row(day, window[0], window[1], parts[1], parts[2], args))
+        if len(parts) not in (3, 4) or len(window) != 2:
+            raise TSError(f"--note '{note}': use \"13:20-16:11 | Testing | what you did\", "
+                          "with \"| repo-key\" at the end to file it under that repo's project")
+        rows.append(manual_row(day, window[0], window[1], parts[1], parts[2], args, repo=(parts + [""])[3]))
     check_rows(rows, day)
     new, report, task_html = build_day(day, rows, use_conversations=not args.no_conversations)
     added = len(rows) - len(sheet["time_logs"] if sheet else []) + len(new)
@@ -1440,7 +1477,7 @@ def regen(emp: dict, day: dt.date, sheet: dict, rows: list, args) -> int:
         if "activity_type" in only:
             r["activity"] = best["activity"]
         if "task" in only and best["subject"] != task_subjects([r["task"]]).get(r["task"]):
-            r["task"], r["subject"] = "", best["subject"]
+            r["task"], r["subject"], r["project"] = "", best["subject"], best["project"]
     for line in report:
         print(f"note: {line}")
     if all(core(r) == r["orig"] for r in rows):
@@ -1462,7 +1499,8 @@ def cmd_add_row(args) -> int:
     if not args.description:
         raise TSError("a row needs a description")
     sheet = find_sheet(emp, day)
-    row = manual_row(day, args.frm, args.to, args.type or "", args.description, args, args.task or "")
+    row = manual_row(day, args.frm, args.to, args.type or "", args.description, args, args.task or "",
+                     args.repo or "")
     write_sheet(emp, day, sheet, rows_of(sheet) + [row], args)
     return 0
 
@@ -1528,25 +1566,28 @@ def cmd_start(args) -> int:
         print(f"already started at {cur['started'][11:16]}: {cur['text']}")
         if not confirm("Start another anyway? Their rows would overlap", args):
             return 1
-    rp, key = repos(), (args.repo or "").lower()
-    if key and key not in rp:
-        raise TSError(f"unknown repo '{args.repo}' - configured: {', '.join(rp) or 'none'}")
+    rp, key = repos(), repo_key(args.repo)
+    if not key and cfg("TRACKING_REPO").lower() in rp:
+        key = cfg("TRACKING_REPO").lower()
     home = rp.get(key) or tracking()
     if not home:
         raise TSError("no repo for the tracking issue: pass --repo, or set a default with "
                       "timesheet config set TRACKING_REPO=owner/name")
+    if not project_of(key):
+        raise TSError(f"no project for this work: give '{key or home.name}' a project in REPOS "
+                      "(key=owner/name|Label|branch|Project), or set a default PROJECT")
     connect()
     start = at(now().date(), args.at) if args.at else now().replace(second=0)
     kind, text = (args.type or guess_kind(args.text)).lower(), typed(args.text, args)
     activity(kind)  # refuse an unknown type before anything is created
     label = kind.title() if kind in KINDS else kind
-    subj = subject(kind, start.date(), home.label or None, title=text[:1].upper() + text[1:60],
-                   window=f"from {hm(start)}")
+    subj = subject(kind, start.date(), key, title=text[:1].upper() + text[1:60], window=f"from {hm(start)}")
     title = f"[{label}] {text} - {fmt_day(start.date())}"
-    print(f"task:   {subj}  (Working)\nissue:  {home.name}: {title}\nstart:  {start:%Y-%m-%d %H:%M}")
+    print(f"task:   {subj}  (Working, project {project_of(key)})\nissue:  {home.name}: {title}\n"
+          f"start:  {start:%Y-%m-%d %H:%M}")
     if not confirm("Create the task, open the issue and start the clock?", args):
         return 0
-    task = ensure_task(subj, start.date(), status="Working")
+    task = ensure_task(subj, start.date(), project_of(key), status="Working")
     state["started"] = {"task": task, "subject": subj, "text": text, "kind": kind, "repo": home.name,
                         "label": home.label, "started": f"{start:%Y-%m-%d %H:%M:%S}", "issue": ""}
     save_state(state)  # saved before the issue, so a failure there still leaves something to finish
@@ -1626,12 +1667,15 @@ TASK_TYPES = {"fixes": "own", "own": "own", "review": "review", "issues": "close
 def cmd_task(args) -> int:
     connect()
     if args.action == "list":
-        filters = [["owner", "=", cfg("TS_USER")], ["project", "=", cfg("PROJECT")]]
+        filters = [["owner", "=", cfg("TS_USER")]]
+        if args.repo or args.project:
+            filters.append(["project", "=", args.project or project_of(repo_key(args.repo))])
         if args.date_given:
             filters.append(["exp_start_date", "=", args.date.isoformat()])
-        for t in get_list("Task", filters, ["name", "subject", "status", "exp_start_date", "expected_time"],
+        for t in get_list("Task", filters, ["name", "subject", "status", "project", "exp_start_date", "expected_time"],
                           order_by="creation desc", limit=20):
-            print(f"{t['name']}  {t['status']:<10}  {t['exp_start_date']}  {t['expected_time'] or 0:5.2f}h  {t['subject']}")
+            print(f"{t['name']}  {t['status']:<10}  {t['exp_start_date']}  {t['expected_time'] or 0:5.2f}h  "
+                  f"{t['project']}: {t['subject']}")
         return 0
     if args.action == "update":
         if not args.name:
@@ -1649,23 +1693,25 @@ def cmd_task(args) -> int:
             log(f"updated task {args.name}: {', '.join(body)}")
         return 0
     # create: free-form with --subject, or from the day's GitHub activity with --repo and --type
-    day, desc = args.date, ""
+    day, desc, key = args.date, "", repo_key(args.repo)
+    project = args.project or project_of(key)
     if args.subject:
         subj = args.subject
         desc = f"<p><strong>{html.escape(subj)}</strong></p><p>{html.escape(typed(args.desc, args))}</p>" if args.desc else ""
     else:
-        rp, kind = repos(), TASK_TYPES.get((args.type or "").lower())
-        if not kind or (kind != "raised" and (args.repo or "").lower() not in rp):
-            raise TSError(f"pass --subject, or --type ({', '.join(TASK_TYPES)}) with --repo ({', '.join(rp)})")
-        subj = subject(kind, day, None if kind == "raised" else rp[args.repo.lower()].label)
+        kind = TASK_TYPES.get((args.type or "").lower())
+        if not kind or not key:
+            raise TSError(f"pass --subject, or --type ({', '.join(TASK_TYPES)}) with --repo ({', '.join(repos())})")
+        subj = subject(kind, day, key, label=kind != "raised")
         desc = describe_tasks(collect_github(day)[0], day).get(subj, "")
         if not desc:
             print(f"note: no matching GitHub activity on {day}; the task will have no list.")
-    print(f"task: {subj}\n      {fmt_day(day)}, {args.hours or 0}h" + (f", under {args.parent}" if args.parent else ""))
+    print(f"task: {subj}\n      project {project or '(none)'}, {fmt_day(day)}, {args.hours or 0}h"
+          + (f", under {args.parent}" if args.parent else ""))
     if desc:
         print("      " + plain_text(desc).replace("\n", "\n      "))
     if confirm("Create this task (or reuse it if it exists)?", args):
-        name = ensure_task(subj, day, desc, expected=args.hours or 0.0, parent=args.parent or "")
+        name = ensure_task(subj, day, project, desc, expected=args.hours or 0.0, parent=args.parent or "")
         print(f"{name}  {cfg('TS_URL')}/app/task/{name}")
     return 0
 
@@ -1732,12 +1778,15 @@ def config_test() -> int:
 
     emp = {}
     check("site login", lambda: emp.update(connect()) or f"{emp['employee_name']} ({emp['name']})")
-    if emp:
-        check("project", lambda: api("GET", f"/api/resource/Project/{cfg('PROJECT')}")["data"]["name"])
+    for project in sorted({project_of(key) for key in list(repos()) + [""]} - {""}) if emp else []:
+        check("project", lambda p=project: api("GET", f"/api/resource/Project/{p}")["data"]["name"])
     check("GitHub login", gh_user)
     for key, r in repos().items():
         check(f"repo {key}", lambda r=r: gh("repo", "view", r.name, "--json", "nameWithOwner",
                                             "--jq", ".nameWithOwner"))
+        if not project_of(key):
+            ok = False
+            print(f"  FAIL  repo {key}: no project - add it as the 4th part of its REPOS entry, or set PROJECT")
     if not repos():
         ok = False
         print("  FAIL  repos: none set - timesheet config set REPOS=key=owner/name|Label|branch")
@@ -1957,7 +2006,9 @@ def parser() -> argparse.ArgumentParser:
     row_fields(p)
     p.add_argument("--regen", action="store_true", help="rebuild the rows from GitHub and conversations")
     p.add_argument("--only", help="with --regen: fields that may change (from,to,description,activity_type,task)")
-    row_fields(cmd("add-row", cmd_add_row, "Add a manual row with no issue behind it"))
+    p = cmd("add-row", cmd_add_row, "Add a manual row with no issue behind it")
+    row_fields(p)
+    p.add_argument("--repo", help="repo key: the row's task is filed under that repo's project")
     cmd("delete-row", cmd_delete_row, "Remove rows").add_argument("--row", required=True)
     cmd("delete", cmd_delete, "Delete a draft timesheet")
     p = cmd("start", cmd_start, "Create a task, then its GitHub issue, and start the clock")
@@ -1977,7 +2028,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--hours", type=float)
     p.add_argument("--status")
     p.add_argument("--parent", help="parent TASK-...")
-    p.add_argument("--repo", help="with --type: build the task from that repo's GitHub activity")
+    p.add_argument("--repo", help="repo key: sets the project; with --type, builds the task from its GitHub activity")
+    p.add_argument("--project", help="project for a free-form task (default: the repo's, else PROJECT)")
     p.add_argument("--type", help=f"one of: {', '.join(TASK_TYPES)}")
     p = cmd("config", cmd_config, "Settings: guided setup when run alone")
     p.add_argument("action", nargs="?", choices=("list", "get", "set", "unset", "set-secret", "test"))

@@ -1,4 +1,4 @@
-# timesheet-autofill
+﻿# timesheet-autofill
 
 Builds a day's **tasks and draft timesheet** on a Frappe / ERPNext site from your GitHub activity and your Claude Code conversations, opens GitHub issues for work that has none, and lets you edit everything from the terminal.
 
@@ -162,7 +162,7 @@ There is no repo list and no project setting. One day can hold rows for several 
 - **Testing rows** are one task per project per day.
 - **Manual work:** `start` uses the repo of the folder you run it in, or `--repo`. `add-row` and `--note` (`"13:20-16:11 | Testing | text | console"`) take `--repo` or `--project`; without either they use the project the sheet's other rows share, else ask. A row given `--task` follows that task's project.
 
-`timesheet config test` shows what has been learned.
+`timesheet config test` shows what has been learned and remembered. To change an answer, `timesheet config forget <part of the repo or folder name>` drops it, and you are asked again on the next run. Answers given during a `--dry-run` are remembered too.
 
 `.env.example` describes every setting. A bad value or an unknown setting is refused and nothing is written. Changing the site address or email re-tests the login.
 

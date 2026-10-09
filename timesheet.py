@@ -628,8 +628,9 @@ def ask_project(what: str, args, guess: str = "") -> str:
                                                  order_by="name asc", limit=500)]
     print(f"\nWhich project is {what} for?")
     cells = [f"{i:>3}. {name[:32]:<32}" for i, name in enumerate(_PROJECTS, 1)]
-    for i in range(0, len(cells), 3):
-        print(" ".join(cells[i:i + 3]).rstrip())
+    across = max(1, (shutil.get_terminal_size().columns - 1) // 38)
+    for i in range(0, len(cells), across):
+        print(" ".join(cells[i:i + across]).rstrip())
     hint = f"Enter = {guess}, - leaves it out" if guess else "Enter leaves it out"
     try:
         answer = input(f"number or part of the name ({hint}): ").strip().lower()
@@ -1054,19 +1055,27 @@ def read_sessions(day: dt.date) -> list:
         if blocks:
             everything = " ".join(prompts + texts)
             sessions.append({
-                "repo": repo_for(cwd), "cwd": cwd, "branch": branch, "blocks": blocks,
+                "id": path.stem, "repo": repo_for(cwd), "cwd": cwd, "branch": branch, "blocks": blocks,
                 "prompts": "\n".join(prompts)[:2500], "closing": texts[-1][:1200] if texts else "",
                 "mentions": {int(n) for n in re.findall(r"(?:#|pull/|issues/)(\d{1,6})\b", everything)},
             })
     return sorted(sessions, key=lambda s: s["blocks"][0][0])
 
 
-def summarise(sessions: list) -> None:
+def summarise(sessions: list, day: dt.date) -> None:
     """Gives each session a one-line 'summary' and a 'kind' through `claude -p`.
     Only that line ever leaves the machine; raw conversation text never does."""
-    for s in sessions:
+    # A summary is written once per session and day and then reused: tasks are found by their
+    # subject, so a re-run (after a dry-run, or a failed save) must word them the same way.
+    state = load_state()
+    keep_from = (day - dt.timedelta(days=30)).isoformat()
+    cache = {k: v for k, v in state.get("summaries", {}).items() if k[:10] >= keep_from}
+    everyone, sessions = sessions, []
+    for s in everyone:
         where = label_of(s["repo"]) if s["repo"] else s["project"]
-        s["summary"], s["kind"] = f"Worked with Claude Code on {where}", "development"
+        s["summary"], s["kind"] = cache.get(f"{day}:{s['id']}") or (f"Worked with Claude Code on {where}", "development")
+        if f"{day}:{s['id']}" not in cache:
+            sessions.append(s)
     if not sessions:
         return
     parts = [f"{PROMPT_MARK} For each numbered work session below, write one line (at most 12 words, past tense, "
@@ -1085,8 +1094,12 @@ def summarise(sessions: list) -> None:
                 s["summary"] = text
             if item.get("kind") in WORK_KINDS:
                 s["kind"] = item["kind"]
+            cache[f"{day}:{s['id']}"] = [s["summary"], s["kind"]]
     except (ValueError, KeyError, IndexError, TypeError):
         log("warning: could not summarise the conversations through Claude Code; using generic descriptions")
+    state = load_state()
+    state["summaries"] = cache
+    save_state(state)
 
 
 _PRS = {}
@@ -1188,7 +1201,7 @@ def build_day(day: dt.date, fixed: list, args, use_conversations: bool = True) -
             place(b0, b1, {"activity": activity("own"), "task": "", "project": s["project"],
                            "description": f"Worked on PR #{pr['number']} - {pr['title']} (not merged yet).",
                            "subject": subject("own", day, s["repo"])}, f"conversation {hm(b0)}-{hm(b1)}")
-    summarise(loose)
+    summarise(loose, day)
     for s in loose:
         # A session in a folder with no repo has nowhere to track an issue, so it gets none.
         issue = {"repo": s["repo"], "title": s["summary"], "kind": s["kind"],
@@ -1895,6 +1908,8 @@ def config_test() -> int:
             print(f"  ok    {repo}: project {seen['project']}, tasks named \"{seen['head']} - ...\"")
         if not known():
             print("  note  no repos learned yet - a repo's project is asked the first time its work shows up")
+        for folder, project in sorted(load_state().get("folders", {}).items()):
+            print(f"  ok    folder {folder}: project {project}  (change: timesheet config forget {folder})")
     print(f"  {'ok  ' if shutil.which('claude') else 'note'}  Claude Code: "
           + ("found - conversations and --polish are available" if shutil.which("claude")
              else "not installed - GitHub is the only source, and --polish is off"))
@@ -2012,6 +2027,14 @@ def cmd_config(args) -> int:
         return apply_settings(dict(item.split("=", 1) for item in items))
     if action == "unset":
         return apply_settings({key: None for key in items})
+    if action == "forget":  # drop a remembered project answer, so it is asked again
+        state, gone = load_state(), []
+        for part in ("repos", "folders"):
+            for key in [k for k in state.get(part, {}) if any(i.replace("\\", "/").lower() in k for i in items)]:
+                gone.append(f"{key} ({state[part].pop(key)})")
+        save_state(state)
+        print("forgot: " + "; ".join(gone) if gone else "nothing remembered matches - see: timesheet config test")
+        return 0
     if action == "set-secret":
         return set_secret()
     return config_test()
@@ -2139,8 +2162,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--project", help="site project for a free-form task (default: the repo's, else asked)")
     p.add_argument("--type", help=f"one of: {', '.join(TASK_TYPES)}")
     p = cmd("config", cmd_config, "Settings: guided setup when run alone")
-    p.add_argument("action", nargs="?", choices=("list", "get", "set", "unset", "set-secret", "test"))
-    p.add_argument("items", nargs="*", help="KEY=value for set; KEY for get and unset")
+    p.add_argument("action", nargs="?", choices=("list", "get", "set", "unset", "set-secret", "test", "forget"))
+    p.add_argument("items", nargs="*", help="KEY=value for set; KEY for get and unset; "
+                                            "part of a repo or folder name for forget")
     cmd("scheduled", cmd_scheduled, "Run by the daily job (see SCHEDULE)")
     return ap
 

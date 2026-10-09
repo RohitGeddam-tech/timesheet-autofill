@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ./install.sh
 ```
 
-The installer finds Python, installs `keyring`, creates the `timesheet` command and runs `timesheet config`, which asks for your settings and password, tests the login, and sets up the daily job if you chose one.
+The installer finds Python, installs `keyring`, creates the `timesheet` command and runs `timesheet config`. That asks for the site address, your email, your working hours and your password, tests the login, and sets up the daily job if you chose one. It does not ask about repos or projects.
 
 Your password is saved in Windows Credential Manager or the macOS Keychain. It is never written to a file, and the tool uses no API key.
 
@@ -116,7 +116,7 @@ timesheet finish
 - **`finish`** adds the row to that date's draft, closes the issue, marks the task Completed with its time window in the name, and lists the bugs you raised in that repo meanwhile.
 - **Forgot to start or finish on time:** `--at 09:30` records the real time in the issue, and that is used over GitHub's timestamps.
 - **Closed the issue on GitHub by hand:** `create` still picks it up.
-- **No `--repo`:** the issue goes to `TRACKING_REPO`.
+- **No `--repo`:** the repo of the folder you run it in is used.
 
 ## Updating a row
 
@@ -149,22 +149,20 @@ timesheet config list
 timesheet config set POLISH_HINT=false LUNCH=13:30-14:30
 ```
 
-### Projects follow the repo
+### Repos and projects are never typed in
 
-Each entry in `REPOS` names the site project its work is filed under, so one day can hold rows for several projects:
+There is no repo list and no project setting. One day can hold rows for several projects.
 
-```
-key=owner/name|Label|merge branch|Project|Subject prefix
-```
-
-```bash
-timesheet config set "REPOS=console=strategic-gears/sg-network-internal-console|Internal Console|staging|Strategic Gears|SG Network,ada=acme/ada-web|Ada Web|main|ADA"
-```
-
-- **GitHub activity and conversations** take the project of the repo they happened in. A conversation belongs to a repo when its folder, or that folder's git remote, is that repo.
+- **Which repos:** every repo that shows up in your GitHub activity for the date, plus the repos of the folders your conversations ran in (read from each folder's git remote), plus the ones seen on earlier runs.
+- **Which project, and how tasks are named:** learned from the tasks you already have on the site. A task `SG Network - Internal Console - PR Review & Merge - 7 Oct 2026` in project Strategic Gears, whose description links PRs of one repo, says where that repo's work goes and how it is named.
+- **A repo it has never seen:** you are asked once which project it belongs to, with the project of your other repos in the same GitHub organisation offered as the Enter answer. The answer is remembered in `.state.json`. Its tasks are named `Project - repo-name - ...`.
+- **A conversation in a folder that is no repo:** asked once per folder, and remembered. It gets a task and rows but no tracking issue, since there is no repo to open one in.
+- **When it can't ask** (`--yes`, the daily job, no terminal): that work is left out and listed in the report, never filed under a guessed project.
+- **Release PRs** (from `develop`, `staging`, `main` or `master` into another branch) are not counted as work.
 - **Testing rows** are one task per project per day.
-- **`PROJECT`** is only the default, for repos that name no project and for work in folders outside every repo. Leave it empty and that work is left out and listed in the report, instead of being filed under the wrong project.
-- **Manual work:** `add-row`, `--note` (`"13:20-16:11 | Testing | text | ada"`) and `start` take a repo key; a row given `--task` follows that task's project.
+- **Manual work:** `start` uses the repo of the folder you run it in, or `--repo`. `add-row` and `--note` (`"13:20-16:11 | Testing | text | console"`) take `--repo` or `--project`; without either they use the project the sheet's other rows share, else ask. A row given `--task` follows that task's project.
+
+`timesheet config test` shows what has been learned.
 
 `.env.example` describes every setting. A bad value or an unknown setting is refused and nothing is written. Changing the site address or email re-tests the login.
 

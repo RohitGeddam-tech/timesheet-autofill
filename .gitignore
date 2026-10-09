@@ -1,4 +1,7 @@
 .env
-attendance.log
+timesheet.log
 __pycache__/
 .state.json
+# written by the installers
+timesheet.cmd
+/timesheet

@@ -5,8 +5,9 @@ activity and Claude Code conversations, and edits them from the terminal.
 
 Uses the Frappe REST API (no browser), signing in with your site email and the
 password kept in the OS credential store (Windows Credential Manager / macOS
-Keychain). GitHub is read and written through the `gh` CLI. Nothing is ever
-submitted, and every write is shown for confirmation first.
+Keychain). GitHub is read and written through the `gh` CLI. Every write is shown
+for confirmation first, and a timesheet is submitted only when you ask for it
+(`submit`, or `create --submit`).
 
     timesheet config                      guided setup
     timesheet create [--date D]           build tasks + draft timesheet (default: yesterday)
@@ -1510,15 +1511,40 @@ def cmd_create(args) -> int:
     show_rows(rows, rows_of(sheet))
     for line in report:
         print(f"note: {line}")
+    submit = args.submit and not args.scheduled  # the daily job never submits
     if not added:
         log(f"{day}: nothing new to add")
-        return 0
+        return submit_sheet(sheet, day, args) if submit and sheet else 0
     post_issues(new, args)
     doc = write_sheet(emp, day, sheet, rows, args, task_html, shown=True)
+    if doc and submit:
+        return submit_sheet(doc, day, args)
     if doc and args.scheduled and flag("NOTIFY"):
         popup("Timesheet draft created", f"Draft {doc['name']} for {fmt_day(day)} was created with {len(rows)} rows."
               "\n\nReview and submit it on the site.", f"{cfg('TS_URL')}/app/timesheet/{doc['name']}")
     return 0
+
+
+def submit_sheet(sheet: dict, day: dt.date, args) -> int:
+    """Submits the day's draft - only ever on your word (`submit`, or `create --submit`), after a y/N."""
+    if sheet["docstatus"] == 1:
+        print(f"{sheet['name']} for {day} is already submitted.")
+        return 0
+    rows = rows_of(sheet)
+    print(f"\n{sheet['name']}  {day:%A} {fmt_day(day)}  {len(rows)} rows, {sum(map(hours, rows)):.2f}h")
+    show_rows(rows)
+    waiting = sum(NO_ISSUE in r["description"] for r in rows)
+    if waiting:
+        print(f"note: {waiting} rows still say {NO_ISSUE} - `timesheet issues --date {day}` opens them first")
+    if not confirm(f"Submit {sheet['name']}? After that it can only be changed with --amend", args):
+        return 0
+    api("POST", "/api/method/frappe.client.submit", body={"doc": sheet})
+    log(f"submitted {sheet['name']} for {day} - {cfg('TS_URL')}/app/timesheet/{sheet['name']}")
+    return 0
+
+
+def cmd_submit(args) -> int:
+    return submit_sheet(need_sheet(connect(), args.date), args.date, args)
 
 
 def cmd_show(args) -> int:
@@ -2067,7 +2093,7 @@ def cmd_scheduled(args) -> int:
                       f"Build the draft with:  timesheet create --date {day}", f"{cfg('TS_URL')}/app/timesheet")
         else:
             args.date, args.yes, args.scheduled = day, True, True
-            args.note, args.force, args.no_conversations = None, False, False
+            args.note, args.force, args.no_conversations, args.submit = None, False, False, False
             cmd_create(args)
             sched["done"] = "created"
         log(f"scheduled ({mode}) for {day}: {sched['done']}")
@@ -2129,6 +2155,8 @@ def parser() -> argparse.ArgumentParser:
                    help="a fixed row for work with no trace; repeatable")
     p.add_argument("--force", action="store_true", help="build even on a holiday, leave or non-work day")
     p.add_argument("--no-conversations", action="store_true", help="use GitHub only")
+    p.add_argument("--submit", action="store_true", help="after saving the draft, submit it (asks first)")
+    cmd("submit", cmd_submit, "Submit the day's draft timesheet (asks first)")
     cmd("show", cmd_show, "List the day's rows, numbered")
     p = cmd("update", cmd_update, "Change a row by prompts or flags, or re-derive rows with --regen")
     p.add_argument("--row", help="row number from `show` (several for --regen: 3,5,7)")

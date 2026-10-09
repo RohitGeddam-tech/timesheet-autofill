@@ -2,7 +2,7 @@
 
 Builds a day's **tasks and draft timesheet** on a Frappe / ERPNext site from your GitHub activity and your Claude Code conversations, opens GitHub issues for work that has none, and lets you edit everything from the terminal.
 
-It never submits a timesheet, and every write is shown for a y/N first.
+Every write is shown for a y/N first, and a timesheet is submitted only when you ask for it.
 
 A fork of [hrms-attendance](https://github.com/DhavalGala999/hrms-attendance): same login, same plumbing, same installers.
 
@@ -48,6 +48,8 @@ Dates are `YYYY-MM-DD`, `today` or `yesterday`. Without `--date`, every command 
 | `timesheet add-row` | Adds a manual row with no issue behind it |
 | `timesheet delete-row --row N` | Removes a row |
 | `timesheet delete` | Deletes a draft timesheet |
+| `timesheet submit` | Submits the day's draft, after a y/N |
+| `timesheet create --submit` | Builds the day, saves the draft, then offers to submit it |
 | `timesheet start "text" [--repo] [--type] [--at]` | Creates a task, then its GitHub issue, and starts the clock |
 | `timesheet finish [--at]` | Closes the issue, adds the row, completes the task |
 | `timesheet status` | Shows what is currently started |
@@ -180,7 +182,7 @@ timesheet config set-secret
 |---|---|
 | `off` (default) | Nothing runs on its own |
 | `remind` | A popup when yesterday has no timesheet, with the command to run |
-| `auto` | Creates yesterday's draft. It never posts issues: rows are marked `[no issue yet]` for `timesheet issues` |
+| `auto` | Creates yesterday's draft. It never submits and never posts issues: rows are marked `[no issue yet]` for `timesheet issues` |
 
 The job checks every 15 minutes and stops for the day once yesterday is handled. `timesheet config set SCHEDULE=...` registers or removes it.
 

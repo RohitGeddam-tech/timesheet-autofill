@@ -1137,23 +1137,6 @@ def summarise(sessions: list, day: dt.date) -> None:
     save_state(state)
 
 
-_PRS = {}
-
-
-def branch_pr(repo: str, branch: str) -> dict | None:
-    """The PR (any state) of a feature branch, if it has one."""
-    if not repo or branch in TRUNKS:
-        return None
-    if (repo, branch) not in _PRS:
-        try:
-            found = json.loads(gh("pr", "list", "-R", repo, "--head", branch, "--state", "all",
-                                  "--json", "number,title,url", "--limit", "1"))
-        except TSError:
-            found = []  # a local-only repo, or one you can no longer read
-        _PRS[(repo, branch)] = found[0] if found else None
-    return _PRS[(repo, branch)]
-
-
 # ---------------------------------------------------------------- building a day
 
 def build_day(day: dt.date, fixed: list, args, use_conversations: bool = True) -> tuple[list, list, dict]:
@@ -1212,14 +1195,19 @@ def build_day(day: dt.date, fixed: list, args, use_conversations: bool = True) -
                "subject": subject(t["kind"], day, t["repo"], title=t["text"][:60],
                                   window=f"{hm(max(t['start'], lo))}-{hm(min(t['end'], hi))}")}, what)
 
-    # Claude Code conversations: part of a GitHub row, work on an open PR, or a new tracking issue.
+    # Claude Code conversations. A sitting is already told by a GitHub row when it led up to a PR
+    # merged that day from its branch, or names one of the day's PRs or issues. Every other sitting
+    # is described from what was asked in it - never from the branch that happened to be checked
+    # out, which says nothing about the work (you may be testing on last week's merged branch).
     numbers = {(e["repo"], e["n"]) for e in events} | {(t["repo"], t["n"]) for t in tracked}
-    branches = {(e["repo"], e["head"]) for e in events if e["head"]}
+    merged_at = {(e["repo"], e["head"]): e["t"] for e in events if e["head"]}
+    slack = dt.timedelta(minutes=int(cfg("IDLE_MINUTES")))
     loose = []
     for s in sessions:
         window = f"{hm(s['blocks'][0][0])}-{hm(s['blocks'][-1][1])}"
         where = s["repo"] or s["cwd"] or "an unknown folder"
-        if (s["repo"], s["branch"]) in branches or any((s["repo"], n) in numbers for n in s["mentions"]):
+        merged = merged_at.get((s["repo"], s["branch"]))
+        if (merged and s["blocks"][0][0] <= merged + slack) or any((s["repo"], n) in numbers for n in s["mentions"]):
             report.append(f"conversation {window} ({where}) is part of the day's GitHub rows")
             continue
         # The project depends on the folder: its repo's project, or one chosen once for a folder with no repo.
@@ -1228,14 +1216,7 @@ def build_day(day: dt.date, fixed: list, args, use_conversations: bool = True) -
             report.append(f"conversation {window} ({where}) is left out: no project chosen for it yet - "
                           "run this in a terminal to be asked once")
             continue
-        pr = branch_pr(s["repo"], s["branch"])
-        if not pr:
-            loose.append(s)
-            continue
-        for b0, b1 in s["blocks"]:
-            place(b0, b1, {"activity": activity("own"), "task": "", "project": s["project"],
-                           "description": f"Worked on PR #{pr['number']} - {pr['title']} (not merged yet).",
-                           "subject": subject("own", day, s["repo"])}, f"conversation {hm(b0)}-{hm(b1)}")
+        loose.append(s)
     summarise(loose, day)
     for s in loose:
         # A session in a folder with no repo has nowhere to track an issue, so it gets none.

@@ -10,7 +10,7 @@ for confirmation first, and a timesheet is submitted only when you ask for it
 (`submit`, or `create --submit`).
 
     timesheet config                      guided setup
-    timesheet create [--date D]           build tasks + draft timesheet (default: yesterday)
+    timesheet create [--date D]           build tasks + draft timesheet (default: today)
     timesheet show   [--date D]           list the day's rows, numbered
     timesheet update --row N              change a row (prompts, or --from/--to/--description/--type/--task)
     timesheet start "text" / finish       timed work with a tracking issue
@@ -2173,7 +2173,7 @@ def a_date(value: str) -> dt.date:
 
 def parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--date", type=a_date, help="YYYY-MM-DD, today or yesterday (default: yesterday)")
+    common.add_argument("--date", type=a_date, help="YYYY-MM-DD, today or yesterday (default: today)")
     common.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     common.add_argument("--yes", action="store_true", help="don't ask y/N")
     common.add_argument("--polish", action="store_true", help="tidy typed text through Claude Code")
@@ -2249,7 +2249,7 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     args = parser().parse_args()
     args.date_given = args.date is not None
-    args.date = args.date or now().date() - dt.timedelta(days=1)
+    args.date = args.date or now().date()
     try:
         return args.fn(args)
     except KeyboardInterrupt:

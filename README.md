@@ -76,19 +76,19 @@ timesheet create
 timesheet submit
 ```
 
-All three work on **yesterday** unless you name a date:
+All three work on **today** unless you name a date:
 
 ```bash
 timesheet create --date 2026-10-08
 ```
 
 ```bash
-timesheet create --date today
+timesheet create --date yesterday
 ```
 
 ## Every command
 
-A date is written `2026-10-08`, or as the words `today` or `yesterday`. Leave `--date` out and the command works on yesterday.
+A date is written `2026-10-08`, or as the words `today` or `yesterday`. Leave `--date` out and the command works on today.
 
 ### Building and checking a day
 
@@ -400,8 +400,9 @@ timesheet add-row --from 10:00 --to 11:30 --type testing --description "tested c
 
 | You want to... | Run |
 |---|---|
-| See what yesterday's timesheet would look like | `timesheet create --dry-run` |
-| Fill in yesterday's timesheet | `timesheet create` |
+| See what today's timesheet would look like | `timesheet create --dry-run` |
+| Fill in today's timesheet | `timesheet create` |
+| Fill in yesterday's timesheet | `timesheet create --date yesterday` |
 | Fill in a particular day | `timesheet create --date 2026-10-08` |
 | Fill it in and submit in one go | `timesheet create --submit` |
 | Hand in a draft | `timesheet submit` |

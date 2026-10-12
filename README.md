@@ -436,6 +436,8 @@ timesheet add-row --from 10:00 --to 11:30 --type testing --description "tested c
 
 **The project.** The tool looks at the tasks you already have on the site. If earlier tasks for a repository sit under "Strategic Gears", new work on that repository goes there too, with the same style of title. For a repository or folder it has never seen, it shows the list of projects and asks once. If it cannot ask (for example when run automatically), it leaves that work out and tells you, instead of guessing.
 
+**Conversations.** One long conversation is cut into sittings wherever you paused for more than 15 minutes. Each sitting gets its own row, its own task and its own one-line description, written from what you asked for during that sitting. So if a conversation moved from one subject to another, the rows say so. A description is written once and then kept, so running the command again does not reword it.
+
 **Days it skips.** Holidays, days you are on leave, and days outside your working week. Add `--force` to build one anyway. A timesheet that is already submitted is left alone.
 
 **Gaps.** Time it could not explain is listed at the end as a gap, with the command to fill it. Work done by hand, away from GitHub and Claude Code, is the usual reason.

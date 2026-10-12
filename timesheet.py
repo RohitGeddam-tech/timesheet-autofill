@@ -540,13 +540,13 @@ def confirm(question: str, args) -> bool:
     return input(f"{question} [y/N]: ").strip().lower().startswith("y")
 
 
-def run_claude(prompt: str, timeout: int = 60) -> str:
+def run_claude(prompt: str, timeout: int = 60, model: str = "haiku") -> str:
     """Output of `claude -p` (Claude Code, using your own login); '' if missing, slow or failing."""
     exe = shutil.which("claude")
     if not exe:
         return ""
     try:
-        r = subprocess.run([exe, "-p", "--model", "haiku"], input=prompt, capture_output=True, text=True,
+        r = subprocess.run([exe, "-p", "--model", model], input=prompt, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout, cwd=str(HERE))
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
@@ -729,7 +729,9 @@ def subject(kind: str, day: dt.date, repo: str = "", title: str | None = None,
     head = head_of(repo) if label else head_of(repo).split(" - ")[0]
     if not head and (project := project or project_of(repo)):  # no repo: named like that project's other tasks
         head = next((seen["head"].split(" - ")[0] for seen in known().values() if seen["project"] == project), project)
-    parts = [head, suffix, fmt_day(day)]
+    # The site allows a task subject 140 characters; a long summary gives way, never the date or window.
+    room = 140 - len(" - ".join(p for p in (head, "", fmt_day(day)) if p is not None)) - len(f" ({window})" if window else "")
+    parts = [head, suffix if len(suffix) <= room else suffix[:max(room - 3, 10)].rstrip() + "...", fmt_day(day)]
     text = " - ".join(p for p in parts if p)
     return f"{text} ({window})" if window else text
 
@@ -994,6 +996,9 @@ def describe_tasks(events: list, day: dt.date) -> dict:
 
 SECRETISH = re.compile(r"[A-Za-z0-9+/_\-]{24,}|\b[0-9a-f]{15,}\b|gh[pousr]_\w+|sk-\w+")
 TRUNKS = ("", "HEAD", "main", "master", "develop", "staging")
+# How a "user" message starts when the app wrote it, not you.
+NOT_TYPED = ("<local-command", "<command-", "<task-notification", "<user-prompt-submit-hook", "<bash-",
+             "[Request interrupted", "Caveat:", "[SYSTEM NOTIFICATION")
 
 
 def repo_for(cwd: str) -> str:
@@ -1013,13 +1018,17 @@ def repo_for(cwd: str) -> str:
 
 
 def read_sessions(day: dt.date) -> list:
-    """Claude Code sessions (CLI and the desktop app's Code tab) with work on `day`, as time blocks."""
+    """Claude Code work on `day` (CLI and the desktop app's Code tab), one entry per sitting.
+
+    A conversation is cut wherever you paused longer than IDLE_MINUTES, and each sitting stands on
+    its own: its own times, folder, branch, and what was asked *during it* - one long conversation
+    often moves from one subject to another, so its sittings must not share a description."""
     lo, hi = day_bounds(day)
     since = (lo - offset()).replace(tzinfo=dt.timezone.utc).timestamp()
     utc_days = {(lo - offset()).date().isoformat(), (hi - offset()).date().isoformat()}
-    idle, sessions = dt.timedelta(minutes=int(cfg("IDLE_MINUTES"))), []
+    idle, sessions, repo_of = dt.timedelta(minutes=int(cfg("IDLE_MINUTES"))), [], {}
     for path in (Path.home() / ".claude" / "projects").glob("*/*.jsonl"):
-        stamps, prompts, texts, cwd, branch = [], [], [], "", ""
+        entries, cwd, branch = [], "", ""  # (time, "user" / "assistant" / "", text, folder, branch)
         try:
             if path.stat().st_mtime < since:
                 continue
@@ -1036,41 +1045,57 @@ def read_sessions(day: dt.date) -> list:
                     t = local(o["timestamp"])
                     if not lo <= t <= hi:
                         continue
-                    stamps.append(t)
                     cwd, branch = o.get("cwd") or cwd, o.get("gitBranch") or branch
                     content = (o.get("message") or {}).get("content")
                     parts = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
                     text = " ".join(p.get("text", "") for p in parts
                                     if isinstance(p, dict) and p.get("type") == "text").strip()
-                    if not text:
-                        continue
-                    if o["type"] == "assistant":
-                        texts.append(text)
-                    elif not o.get("isMeta") and not text.startswith("<"):
-                        prompts.append(text)
+                    # Only what you typed counts as "asked": not tool output, not notes the app adds.
+                    # (Text you pasted also starts with a "<tag>", so only the app's own tags are dropped.)
+                    if o["type"] == "user":
+                        text = re.sub(r"<system-reminder>.*?</system-reminder>\s*", "", text, flags=re.S).strip()
+                    spoken = text and (o["type"] == "assistant" or not (o.get("isMeta") or text.startswith(NOT_TYPED)))
+                    entries.append((t, o["type"] if spoken else "", text, cwd, branch))
         except OSError:
             continue
-        if any(p.startswith(PROMPT_MARK) for p in prompts):
+        if any(role == "user" and text.startswith(PROMPT_MARK) for _, role, text, _, _ in entries):
             continue  # this tool's own `claude -p` calls
-        blocks = [b for b in split_blocks(sorted(stamps), idle) if b[1] - b[0] >= MIN_ROW]
-        if blocks:
-            everything = " ".join(prompts + texts)
+        entries.sort(key=lambda e: e[0])
+        for b0, b1 in split_blocks([e[0] for e in entries], idle):
+            if b1 - b0 < MIN_ROW:
+                continue
+            inside = [e for e in entries if b0 <= e[0] <= b1]
+            # A long message keeps both ends: pasted material usually comes first, the actual request last.
+            trim = lambda text: text if len(text) <= 700 else f"{text[:300]} [...] {text[-400:]}"  # noqa: E731
+            asked = [trim(text) for _, role, text, _, _ in inside if role == "user"]
+            if not asked:  # the assistant was still working on the request from before the pause
+                asked = [trim(text) for t, role, text, _, _ in entries if role == "user" and t < b0][-1:]
+            said = [text for _, role, text, _, _ in inside if role == "assistant"]
+            folder, on_branch = inside[-1][3], inside[-1][4]
+            if folder not in repo_of:
+                repo_of[folder] = repo_for(folder)
+            joined = "\n- ".join(asked)
             sessions.append({
-                "id": path.stem, "repo": repo_for(cwd), "cwd": cwd, "branch": branch, "blocks": blocks,
-                "prompts": "\n".join(prompts)[:2500], "closing": texts[-1][:1200] if texts else "",
-                "mentions": {int(n) for n in re.findall(r"(?:#|pull/|issues/)(\d{1,6})\b", everything)},
+                "id": f"{path.stem}:{b0:%H:%M}", "repo": repo_of[folder], "cwd": folder, "branch": on_branch,
+                "blocks": [(b0, b1)],
+                # a long sitting: keep how it began and how it ended
+                "prompts": joined if len(joined) <= 3000 else f"{joined[:1500]}\n[...]\n{joined[-1500:]}",
+                "closing": said[-1][:800] if said else "",
+                "mentions": {int(n) for n in re.findall(r"(?:#|pull/|issues/)(\d{1,6})\b", " ".join(asked + said))},
             })
     return sorted(sessions, key=lambda s: s["blocks"][0][0])
 
 
 def summarise(sessions: list, day: dt.date) -> None:
-    """Gives each session a one-line 'summary' and a 'kind' through `claude -p`.
+    """Gives each sitting a one-line 'summary' and a 'kind' through `claude -p`.
     Only that line ever leaves the machine; raw conversation text never does."""
-    # A summary is written once per session and day and then reused: tasks are found by their
-    # subject, so a re-run (after a dry-run, or a failed save) must word them the same way.
+    # A summary is written once per sitting and then reused: tasks are found by their subject, so
+    # a re-run (after a dry-run, or a failed save) must word them the same way. A sitting that is
+    # still going is not kept, because what it is about can still change.
     state = load_state()
     keep_from = (day - dt.timedelta(days=30)).isoformat()
     cache = {k: v for k, v in state.get("summaries", {}).items() if k[:10] >= keep_from}
+    settled = now() - dt.timedelta(minutes=int(cfg("IDLE_MINUTES")))
     everyone, sessions = sessions, []
     for s in everyone:
         where = label_of(s["repo"]) if s["repo"] else s["project"]
@@ -1079,23 +1104,32 @@ def summarise(sessions: list, day: dt.date) -> None:
             sessions.append(s)
     if not sessions:
         return
-    parts = [f"{PROMPT_MARK} For each numbered work session below, write one line (at most 12 words, past tense, "
-             "starting with the action) saying what was done. No names of people, no file paths, no keys or "
-             f"passwords. Also classify the kind of work as one of: {', '.join(WORK_KINDS)}. Reply with only "
-             'a JSON array like [{"n": 1, "summary": "...", "kind": "development"}].']
+    parts = [f"{PROMPT_MARK} Below are numbered sittings of work. For each one, write a single line for a "
+             "timesheet saying what the person worked on in that sitting. Go by what they ASKED FOR in that "
+             "sitting: name the actual subject (the feature, bug, screen, document or tool) and what was done to "
+             "it. A message may begin with pasted material; the request itself is usually its last sentence. If "
+             "they asked for several different things, cover them together in order of weight ('Built X, added "
+             "Y and documented Z') instead of picking one, and never just the last small request. The "
+             "assistant's last reply is only there to tell you how it turned out. "
+             "Past tense, start with the action, at most 18 words, plain words. No names of people, no file "
+             f"paths, no keys or passwords. Also give the kind of work, one of: {', '.join(WORK_KINDS)}. Reply "
+             'with only a JSON array like [{"n": 1, "summary": "...", "kind": "development"}].']
     for i, s in enumerate(sessions, 1):
-        parts.append(f"\n--- Session {i} (repo: {s['repo'] or 'none'}, branch: {s['branch'] or 'none'})\n"
-                     f"What was asked:\n{s['prompts']}\n\nHow it ended:\n{s['closing']}")
-    out = run_claude("\n".join(parts), timeout=120)
+        b0, b1 = s["blocks"][0]
+        parts.append(f"\n--- Sitting {i}: {hm(b0)}-{hm(b1)}, repo {s['repo'] or 'none'}, branch {s['branch'] or 'none'}\n"
+                     f"What the person asked for, in order:\n- {s['prompts'] or '(nothing typed; the assistant kept working)'}"
+                     f"\n\nThe assistant's last reply in this sitting:\n{s['closing']}")
+    out = run_claude("\n".join(parts), timeout=180, model="sonnet")  # the small model kept missing the point
     try:
         for item in json.loads(out[out.index("["):out.rindex("]") + 1]):
             s = sessions[int(item["n"]) - 1]
-            text = " ".join(str(item["summary"]).split()).rstrip(".")[:90]
+            text = " ".join(str(item["summary"]).split()).rstrip(".")[:160]
             if text and not SECRETISH.search(text):
                 s["summary"] = text
             if item.get("kind") in WORK_KINDS:
                 s["kind"] = item["kind"]
-            cache[f"{day}:{s['id']}"] = [s["summary"], s["kind"]]
+            if s["blocks"][0][1] <= settled:
+                cache[f"{day}:{s['id']}"] = [s["summary"], s["kind"]]
     except (ValueError, KeyError, IndexError, TypeError):
         log("warning: could not summarise the conversations through Claude Code; using generic descriptions")
     state = load_state()
@@ -1956,6 +1990,18 @@ def set_secret() -> int:
 
 def guided_setup() -> int:
     need_tty()
+    # Anything that would stop the password being saved is checked first, so setup never asks
+    # for your details and then fails.
+    try:
+        __import__("keyring")
+    except ImportError:
+        if sys.platform != "darwin":
+            raise TSError("the 'keyring' package is missing, so the password could not be stored. Install it with:\n"
+                          f"  {sys.executable} -m pip install --user keyring\nthen run this again. "
+                          "Nothing was asked or saved.") from None
+    if not shutil.which("gh"):
+        raise TSError("the GitHub CLI (gh) is not installed - get it from https://cli.github.com, run "
+                      "'gh auth login', then run this again. Nothing was asked or saved.")
     print("timesheet setup - press Enter to keep the value in [brackets].\n")
     values = {}
     for key in GUIDED:

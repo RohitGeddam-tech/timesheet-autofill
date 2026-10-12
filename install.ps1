@@ -50,17 +50,42 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+# Every step below either succeeds or stops the installer. Nothing is asked until all of them pass,
+# so an error on screen always means: stopped here, nothing asked, nothing saved.
+function Stop-Install($message) {
+    Write-Host ""
+    Write-Host $message -ForegroundColor Red
+    Write-Host "Setup stopped. None of your details were asked or saved. Fix the problem above and run this again." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "Installing the 'keyring' Python package (stores your password in Windows Credential Manager)..."
-& $Py -m pip install --user --quiet --disable-pip-version-check --no-warn-script-location keyring
-if ($LASTEXITCODE -ne 0) { Write-Host "pip install keyring failed - see the error above." -ForegroundColor Red; exit 1 }
+# Output is kept back and shown only on failure: pip writes harmless warnings that PowerShell prints as errors.
+$pipOutput = & $Py -m pip install --user --quiet --disable-pip-version-check --no-warn-script-location keyring 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $pipOutput | ForEach-Object { Write-Host "  $_" }
+    Stop-Install "Installing 'keyring' failed (see above). It is usually no internet connection, or a company proxy blocking pip."
+}
+# Installed is not the same as working: check it can reach Credential Manager.
+$check = & $Py -c "import keyring; keyring.get_password('$Service', 'install-check')" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $check | ForEach-Object { Write-Host "  $_" }
+    Stop-Install "'keyring' is installed but cannot reach Windows Credential Manager (see above), so the password could not be stored."
+}
+& gh auth status 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Stop-Install "The GitHub CLI is not signed in. Run 'gh auth login' first." }
 
 # `timesheet` command: a one-line wrapper next to the script, pinned to the Python found above.
-[IO.File]::WriteAllText((Join-Path $Dir "timesheet.cmd"), "@`"$Py`" `"%~dp0timesheet.py`" %*`r`n")
+try {
+    [IO.File]::WriteAllText((Join-Path $Dir "timesheet.cmd"), "@`"$Py`" `"%~dp0timesheet.py`" %*`r`n")
+} catch { Stop-Install "Could not create the 'timesheet' command in $Dir : $($_.Exception.Message)" }
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if (($userPath -split ';') -notcontains $Dir) {
     if ((Read-Host "Add $Dir to your PATH, so 'timesheet' works from any folder? [Y/n]") -notmatch '^[Nn]') {
-        [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(';') + ";$Dir"), "User")
-        Write-Host "Added. Open a new terminal for it to take effect."
+        try {
+            [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(';') + ";$Dir"), "User")
+            Write-Host "Added. It works in terminals opened from now on; in this one, type .\timesheet from this folder."
+        } catch { Write-Host "Could not change PATH ($($_.Exception.Message)). You can still run .\timesheet from this folder." -ForegroundColor Yellow }
     }
 }
 

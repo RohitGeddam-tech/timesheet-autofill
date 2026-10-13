@@ -2140,6 +2140,65 @@ def cmd_scheduled(args) -> int:
         return 1
 
 
+# ---------------------------------------------------------------- updating the tool itself
+
+def git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """git in this tool's own folder; never stops to ask for a username or password."""
+    return subprocess.run(["git", "-C", str(HERE), *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+
+
+def update_notice() -> None:
+    """Once a day, quietly checks whether a newer version exists, and says so until you upgrade."""
+    state, today = load_state(), now().date().isoformat()
+    if state.get("update_check") != today and (HERE / ".git").exists():
+        try:
+            git("fetch", "--quiet", timeout=8)
+            behind = int(git("rev-list", "--count", "HEAD..@{u}", timeout=8).stdout.strip() or 0)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            behind = 0  # offline, no git, or not a copy that follows a remote: nothing to say
+        state = load_state()
+        state["update_check"], state["update_behind"] = today, behind
+        save_state(state)
+    if state.get("update_behind"):
+        print(f"note: a newer version of timesheet is available ({state['update_behind']} changes) - "
+              "get it with: timesheet upgrade\n")
+
+
+def cmd_upgrade(args) -> int:
+    """Brings this copy up to date. Settings, the saved password and what the tool has learned are
+    not part of the download, so they stay as they are."""
+    if not (HERE / ".git").exists():
+        raise TSError("this copy was not installed with git, so it cannot update itself. Download the latest "
+                      "version over this folder; your settings and saved password are kept.")
+    try:
+        before = git("rev-parse", "HEAD").stdout.strip()
+        fetched = git("fetch", "--quiet")
+        if fetched.returncode:
+            raise TSError("could not reach the place this was installed from: " + fetched.stderr.strip()[-300:])
+        coming = git("log", "--reverse", "--format=  - %s", "HEAD..@{u}").stdout.rstrip()
+        if not coming:
+            print("already up to date.")
+        elif args.dry_run:
+            print(f"a newer version is available. It would bring:\n{coming}\ndry-run: nothing changed.")
+            return 0
+        else:
+            pulled = git("merge", "--ff-only", "@{u}")
+            if pulled.returncode:
+                raise TSError("could not update, because files in this folder were changed by hand:\n"
+                              + (pulled.stderr or pulled.stdout).strip()[-400:]
+                              + "\nUndo those changes (git stash), then run: timesheet upgrade")
+            log(f"upgraded timesheet from {before[:7]} to {git('rev-parse', 'HEAD').stdout.strip()[:7]}")
+            print(f"What is new:\n{coming}")
+    except FileNotFoundError:
+        raise TSError("git is not installed, so this copy cannot update itself - install git, or download "
+                      "the latest version over this folder") from None
+    state = load_state()
+    state["update_check"], state["update_behind"] = now().date().isoformat(), 0
+    save_state(state)
+    return 0
+
+
 # ---------------------------------------------------------------- command line
 
 def a_date(value: str) -> dt.date:
@@ -2220,6 +2279,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("action", nargs="?", choices=("list", "get", "set", "unset", "set-secret", "test", "forget"))
     p.add_argument("items", nargs="*", help="KEY=value for set; KEY for get and unset; "
                                             "part of a repo or folder name for forget")
+    cmd("upgrade", cmd_upgrade, "Get the latest version of this tool (settings and password are kept)")
     cmd("scheduled", cmd_scheduled, "Run by the daily job (see SCHEDULE)")
     return ap
 
@@ -2232,6 +2292,8 @@ def main() -> int:
     args.date_given = args.date is not None
     args.date = args.date or now().date()
     try:
+        if args.command not in ("upgrade", "scheduled", "config"):  # config's output is read by the installers
+            update_notice()
         return args.fn(args)
     except KeyboardInterrupt:
         print("\nstopped; nothing more was written.")

@@ -419,6 +419,7 @@ timesheet add-row --from 10:00 --to 11:30 --type testing --description "tested c
 | Fix a wrong project choice | `timesheet config forget <name>` |
 | Save a new password | `timesheet config set-secret` |
 | Find out why something fails | `timesheet config test` |
+| Get the latest version of the tool | `timesheet upgrade` |
 
 ## How it decides things
 
@@ -476,6 +477,26 @@ Even on `auto` it never submits and never posts on GitHub. Rows that would have 
 | A message from the site you do not understand | Nothing half-finished is left on the timesheet. Read the message; it comes from the site's own rules |
 
 The file `timesheet.log` in this folder keeps a record of what each run did.
+
+## Getting the latest version
+
+```bash
+timesheet upgrade
+```
+
+That is all. It fetches the newest version and tells you what changed. You do not need to open the folder, and you do not need to run the installer again. Your settings, your saved password and everything the tool has learned stay exactly as they are.
+
+- **You will be told when there is something new.** Once a day the tool checks quietly, and if a newer version exists it prints a one-line note with this command until you upgrade.
+- **To look before you leap:** `timesheet upgrade --dry-run` lists what the new version would bring and changes nothing.
+- **If it says files were changed by hand:** someone edited the tool's own files in this folder. Undo those edits and run it again.
+
+**If you installed before this command existed,** your copy does not know `upgrade` yet. Do this once, from inside the tool's folder:
+
+```bash
+git pull
+```
+
+From then on, `timesheet upgrade` works from anywhere.
 
 ## Removing it
 
